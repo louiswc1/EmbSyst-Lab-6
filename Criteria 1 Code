@@ -1,0 +1,233 @@
+//=====[Libraries]=============================================================
+
+#include "mbed.h"
+#include "arm_book_lib.h"
+
+#include "user_interface.h"
+
+#include "code.h"
+#include "siren.h"
+#include "smart_home_system.h"
+#include "fire_alarm.h"
+#include "date_and_time.h"
+#include "temperature_sensor.h"
+#include "gas_sensor.h"
+#include "matrix_keypad.h"
+#include "display.h"
+
+//=====[Declaration of private defines]========================================
+
+#define DISPLAY_REFRESH_TIME_MS 1000
+#define TEMPERATURE_LIMIT_CELSIUS 16
+
+//=====[Declaration of private data types]=====================================
+
+//=====[Declaration and initialization of public global objects]===============
+
+DigitalOut incorrectCodeLed(LED3);
+DigitalOut systemBlockedLed(LED2);
+
+//=====[Declaration of external public global variables]=======================
+
+//=====[Declaration and initialization of public global variables]=============
+
+char codeSequenceFromUserInterface[CODE_NUMBER_OF_KEYS];
+
+//=====[Declaration and initialization of private global variables]============
+
+static bool incorrectCodeState = OFF;
+static bool systemBlockedState = OFF;
+
+static bool codeComplete = false;
+static int numberOfCodeChars = 0;
+
+static bool showTemperature = false; //toggle for temperature display
+static bool showGas = false;       //toggle for gas display
+
+//=====[Declarations (prototypes) of private functions]========================
+
+static void userInterfaceMatrixKeypadUpdate();
+static void incorrectCodeIndicatorUpdate();
+static void systemBlockedIndicatorUpdate();
+
+static void userInterfaceDisplayInit();
+static void userInterfaceDisplayUpdate();
+
+//=====[Implementations of public functions]===================================
+
+void userInterfaceInit()
+{
+    incorrectCodeLed = OFF;
+    systemBlockedLed = OFF;
+    matrixKeypadInit( SYSTEM_TIME_INCREMENT_MS );
+    userInterfaceDisplayInit();
+}
+
+void userInterfaceUpdate()
+{
+    userInterfaceMatrixKeypadUpdate();
+    incorrectCodeIndicatorUpdate();
+    systemBlockedIndicatorUpdate();
+    userInterfaceDisplayUpdate();
+}
+
+bool incorrectCodeStateRead()
+{
+    return incorrectCodeState;
+}
+
+void incorrectCodeStateWrite( bool state )
+{
+    incorrectCodeState = state;
+}
+
+bool systemBlockedStateRead()
+{
+    return systemBlockedState;
+}
+
+void systemBlockedStateWrite( bool state )
+{
+    systemBlockedState = state;
+}
+
+bool userInterfaceCodeCompleteRead()
+{
+    return codeComplete;
+}
+
+void userInterfaceCodeCompleteWrite( bool state )
+{
+    codeComplete = state;
+}
+
+//=====[Implementations of private functions]==================================
+
+static void userInterfaceMatrixKeypadUpdate()
+{
+    static int numberOfHashKeyReleased = 0;
+    char keyReleased = matrixKeypadUpdate();
+
+    if( keyReleased != '\0' ) {
+
+        if( sirenStateRead() && !systemBlockedStateRead() ) {
+            if( !incorrectCodeStateRead() ) {
+                codeSequenceFromUserInterface[numberOfCodeChars] = keyReleased;
+                numberOfCodeChars++;
+                if ( numberOfCodeChars >= CODE_NUMBER_OF_KEYS ) {
+                    codeComplete = true;
+                    numberOfCodeChars = 0;
+                }
+            } else {
+                if( keyReleased == '#' ) {
+                    numberOfHashKeyReleased++;
+                    if( numberOfHashKeyReleased >= 2 ) {
+                        numberOfHashKeyReleased = 0;
+                        numberOfCodeChars = 0;
+                        codeComplete = false;
+                        incorrectCodeState = OFF;
+                    }
+                }
+            }
+        }
+
+        //show temperature display when '2' is pressed
+        if (keyReleased == '2') {
+            showTemperature = !showTemperature;
+        }
+
+        //show gas display when '3' is pressed
+        if (keyReleased == '3') {
+            showGas = !showGas;
+        }
+    }
+}
+
+static void userInterfaceDisplayInit()
+{
+    displayInit( DISPLAY_CONNECTION_I2C_PCF8574_IO_EXPANDER );
+     
+    displayCharPositionWrite ( 0,0 );
+    displayStringWrite( "                    " ); //clear temperature line
+
+    displayCharPositionWrite ( 0,1 );
+    displayStringWrite( "                    " ); //clear gas line
+    
+    displayCharPositionWrite ( 0,2 );
+    displayStringWrite( "Alarm:" );
+
+    displayCharPositionWrite ( 0,3 );
+    displayStringWrite( "                    " ); //initialize the 4th line as blank
+}
+
+static void userInterfaceDisplayUpdate()
+{
+    static int accumulatedDisplayTime = 0;
+    char temperatureString[3] = "";
+    
+    if( accumulatedDisplayTime >= DISPLAY_REFRESH_TIME_MS ) {
+
+        accumulatedDisplayTime = 0;
+
+        //update temperature display if turned on
+        if (showTemperature) {
+            float currentTemperature = temperatureSensorReadCelsius();
+            sprintf(temperatureString, "%.0f", currentTemperature);
+            displayCharPositionWrite ( 0,0 );
+            displayStringWrite( "Temperature:" );
+            displayCharPositionWrite ( 12,0 );
+            displayStringWrite( temperatureString );
+            displayCharPositionWrite ( 14,0 );
+            displayStringWrite( "'C" );
+        } else {
+            displayCharPositionWrite ( 0,0 );
+            displayStringWrite( "                    " ); //clear temperature line
+        }
+
+        //update gas detection display if turned on
+        if (showGas) {
+            displayCharPositionWrite ( 0,1 );
+            displayStringWrite( "Gas:" );
+            displayCharPositionWrite ( 4,1 );
+            if ( gasDetectorStateRead() ) {
+                displayStringWrite( "Detected    " );
+            } else {
+                displayStringWrite( "Not Detected" );
+            }
+        } else {
+            displayCharPositionWrite ( 0,1 );
+            displayStringWrite( "                    " ); //clear gas line
+        }
+
+        // Update alarm status display
+        displayCharPositionWrite ( 6,2 );
+        if ( sirenStateRead() ) {
+            displayStringWrite( "ON " );
+        } else {
+            displayStringWrite( "OFF" );
+        }
+
+        // Display messages on the 4th line based on conditions
+        displayCharPositionWrite ( 0,3 );
+        if ( temperatureSensorReadCelsius() > TEMPERATURE_LIMIT_CELSIUS ) {
+            displayStringWrite( "Temp exceeded 16C!" );
+        } else if ( sirenStateRead() && gasDetectorStateRead() ) {
+            displayStringWrite( "Gas levels exceeded!" );
+        } else {
+            displayStringWrite( "                    " );
+        }
+
+    } else {
+        accumulatedDisplayTime = accumulatedDisplayTime + SYSTEM_TIME_INCREMENT_MS;        
+    } 
+}
+
+static void incorrectCodeIndicatorUpdate()
+{
+    incorrectCodeLed = incorrectCodeStateRead();
+}
+
+static void systemBlockedIndicatorUpdate()
+{
+    systemBlockedLed = systemBlockedState;
+}
